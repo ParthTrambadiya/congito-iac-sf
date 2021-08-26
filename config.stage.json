@@ -1,0 +1,7 @@
+{
+    "COGNITO_DOMAIN": "must be unique",
+    "CALLBACK_URL": "without https:// e.g., xyz.com",
+    "LOGOUT_URL": "without https:// e.g., xyz.com",
+    "SSM_GOOGLE_CLIENT_ID_PATH": "e.g., /dev/cognito/federated-identity/google/client-id",
+    "SSM_GOOGLE_CLIENT_SECRET_PATH": "e.g., /dev/cognito/federated-identity/google/client-secret"
+}

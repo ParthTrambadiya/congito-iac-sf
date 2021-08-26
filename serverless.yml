@@ -1,0 +1,196 @@
+service: cognito-iac-sf
+frameworkVersion: '2'
+
+plugins:
+  - serverless-export-env
+  - serverless-iam-roles-per-function
+  - serverless-stack-output
+
+provider:
+  name: aws
+  runtime: python3.8
+  lambdaHashingVersion: 20201221
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+
+custom:
+  cognito-domain-name: ${file(./config.${self:provider.stage}.json):COGNITO_DOMAIN}
+  callback-url: ${file(./config.${self:provider.stage}.json):CALLBACK_URL}
+  logout-url: ${file(./config.${self:provider.stage}.json):LOGOUT_URL}
+  google-client-id: ${ssm:${file(./config.${self:provider.stage}.json):SSM_GOOGLE_CLIENT_ID_PATH}}
+  google-client-secret: ${ssm:${file(./config.${self:provider.stage}.json):SSM_GOOGLE_CLIENT_SECRET_PATH}}
+  output:
+    file: output-stack.yml
+
+package:
+  patterns:
+    - '!node_modules/**'
+    - '!.gitignore'
+    - '!.npmignore'
+    - '!*.json'
+    - '!output-stack.yml'
+  individually: true
+
+functions:
+  customEmailVerification:
+    name: ${self:service}-custom-email-vertification-${self:provider.stage}
+    handler: functions/custom_email_verification.lambda_handler
+
+  confirmUserSignup:
+    name: ${self:service}-user-confirm-signup-${self:provider.stage}
+    handler: functions/confirm_user_signup.lambda_handler
+    environment:
+      USERS_TABLE: !Ref UsersTable      
+    iamRoleStatements:
+      - Effect: Allow
+        Action: dynamodb:PutItem
+        Resource: !GetAtt UsersTable.Arn
+
+resources:
+  Resources:
+  #----DynamoDB Configurations-----#
+    #----User Table----#
+    UsersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-user-table-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+
+  #----Cognito Configurations----#
+    #----Cognito Userpool Configurations----#
+    CognitoUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: ${self:service}-UserPool-${self:provider.stage}
+        Schema:
+          - AttributeDataType: String
+            Name: name
+            Required: True
+            Mutable: True
+          - AttributeDataType: String
+            Name: email
+            Required: True
+            Mutable: False
+        AutoVerifiedAttributes:
+          - email
+        UsernameConfiguration:
+          CaseSensitive: False
+        UsernameAttributes:
+          - email
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 10
+            RequireLowercase: True
+            RequireUppercase: True
+            RequireNumbers: True
+            RequireSymbols: True
+        AccountRecoverySetting:
+          RecoveryMechanisms:
+            - Name: verified_email
+              Priority: 1
+        EmailConfiguration:
+          EmailSendingAccount: COGNITO_DEFAULT
+        VerificationMessageTemplate:
+          DefaultEmailOption: CONFIRM_WITH_LINK
+        LambdaConfig:
+          CustomMessage: !GetAtt CustomEmailVerificationLambdaFunction.Arn
+          PostConfirmation: !GetAtt ConfirmUserSignupLambdaFunction.Arn
+
+    #----Cognito Domain Configurations----#
+    CognitoUserPoolDomain:
+      Type: AWS::Cognito::UserPoolDomain
+      Properties:
+        Domain: ${self:custom.cognito-domain-name}-${self:provider.stage}
+        UserPoolId: !Ref CognitoUserPool
+
+    #----Cogntio Federated Identity(Google)----#
+    UserPoolGoogleIdentityProvider:
+      Type: AWS::Cognito::UserPoolIdentityProvider
+      Properties:
+        UserPoolId: !Ref CognitoUserPool
+        ProviderName: Google
+        ProviderDetails:
+          client_id: ${self:custom.google-client-id}
+          client_secret: ${self:custom.google-client-secret}
+          authorize_scopes: "profile email openid"
+        ProviderType: Google
+        AttributeMapping:
+          email: email
+          name: name
+    
+        #----Cognito Web Client Congigurations----#
+    WebUserPoolClient:
+      DependsOn: UserPoolGoogleIdentityProvider
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: web
+        UserPoolId: !Ref CognitoUserPool
+        ExplicitAuthFlows:
+          - ALLOW_USER_SRP_AUTH
+          - ALLOW_USER_PASSWORD_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+        PreventUserExistenceErrors: LEGACY
+        AllowedOAuthFlowsUserPoolClient: True
+        SupportedIdentityProviders:
+          - COGNITO
+          - Google
+        CallbackURLs: #enter your callback url
+          - !Join ["", ["https://", '${self:custom.callback-url}', ""]]
+        LogoutURLs: #enter your sign out url
+          - !Join ["", ["https://", '${self:custom.logout-url}', ""]]
+        AllowedOAuthFlows:
+          - implicit
+        AllowedOAuthScopes:
+          - email
+          - openid
+          - profile
+
+    #----Lambda permission----#
+    UserPoolInvokeConfirmUserSignupLambdaPermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        Action: lambda:invokeFunction
+        FunctionName: !Ref ConfirmUserSignupLambdaFunction
+        Principal: cognito-idp.amazonaws.com
+        SourceArn: !GetAtt CognitoUserPool.Arn
+    
+    UserPoolInvokeCustomEMailVerificationLambdaPermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        Action: lambda:invokeFunction
+        FunctionName: !Ref CustomEmailVerificationLambdaFunction
+        Principal: cognito-idp.amazonaws.com
+        SourceArn: !GetAtt CognitoUserPool.Arn
+
+  Outputs:
+    StackName:
+      Description: This is your cloudformation stack name
+      Value: ${self:service}
+    StackRegion:
+      Description: This is your cloudformation stack region
+      Value: ${self:provider.region}
+    StackStage:
+      Description: This is your cloudformation stack stage, 'dev' is default
+      Value: ${self:provider.stage}
+    UserPoolDomain:
+      Description: This is your cognito user pool domain
+      Value: !Sub 'https://${CognitoUserPoolDomain}.auth.${self:provider.region}.amazoncognito.com'
+    CognitoUserPoolId:
+      Description: This is your cognito user pool ID
+      Value: !Ref CognitoUserPool
+    CognitoWebClientId:
+      Description: This is your cognito user pool wed client ID
+      Value: !Ref WebUserPoolClient
+    CognitoUserPoolSigninUrl:
+      Description: This is your cognito user pool sign-in url
+      Value: !Sub 'https://${CognitoUserPoolDomain}.auth.${self:provider.region}.amazoncognito.com/login?response_type=token&client_id=${WebUserPoolClient}&redirect_uri=https://${self:custom.callback-url}'
+    CognitoUserPoolSignupUrl:
+      Description: This is your cognito user pool sign-up url
+      Value: !Sub 'https://${CognitoUserPoolDomain}.auth.${self:provider.region}.amazoncognito.com/signup?response_type=token&client_id=${WebUserPoolClient}&redirect_uri=https://${self:custom.callback-url}'
+
